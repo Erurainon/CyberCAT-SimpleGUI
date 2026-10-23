@@ -3,7 +3,6 @@ using WolvenKit.Common.Services;
 using WolvenKit.Core.CRC;
 using WolvenKit.RED4.Archive.IO;
 using WolvenKit.RED4.TweakDB;
-using WolvenKit.RED4.TweakDB.Helper;
 using WolvenKit.RED4.Types;
 using EFileReadErrorCodes = WolvenKit.RED4.Archive.IO.EFileReadErrorCodes;
 
@@ -11,6 +10,8 @@ namespace ResourceGenerator
 {
     internal class Program
     {
+        // Point at a Cyberpunk 2077 install that matches the WolvenKit submodule game version
+        // (Update 2.5 / tweakdb from patch 2.5) before regenerating Vehicles / ItemClasses / Facts / ModifierGroups.
         private static string _gameDir = @"C:\Games\Steam\steamapps\common\Cyberpunk 2077";
 
         static void Main(string[] args)
@@ -21,9 +22,8 @@ namespace ResourceGenerator
 
         private static void GenerateTweakFiles(string tweakPath)
         {
-            var stringHelper = new TweakDBStringHelper();
-            stringHelper.LoadFromStream(typeof(TweakDBService).Assembly.GetManifestResourceStream("WolvenKit.Common.Resources.tweakdbstr.kark"));
-            TweakDBIDPool.ResolveHashHandler += stringHelper.GetString;
+            // HashService loads tweakdbstr / usedhashes into the shared pools (API replaced ResolveHashHandler).
+            _ = new HashService();
 
             using var fh = File.OpenRead(tweakPath);
             using var reader = new TweakDBReader(fh);

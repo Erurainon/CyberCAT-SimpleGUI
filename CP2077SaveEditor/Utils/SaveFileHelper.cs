@@ -146,12 +146,136 @@ namespace CP2077SaveEditor
 
         public gameSavedStatsData GetStatsFromStatsObjectId(gameStatsObjectID id)
         {
-            var index = GetStatsContainer().Keys.IndexOf(id);
-            if (index == -1)
+            var map = GetStatsContainer();
+            var index = map.Keys.IndexOf(id);
+
+            if (index >= 0 && index < map.Values.Count)
             {
-                return null;
+                var legacy = map.Values[index];
+                if (HasUsableLegacyStats(legacy))
+                {
+                    return legacy;
+                }
             }
-            return GetStatsContainer().Values[index];
+
+            // Update 2.4 / 2.5 may store stats in ValuesOptimized instead of Values.
+            if (map.ValuesOptimized is { Count: > 0 })
+            {
+                for (var i = 0; i < map.ValuesOptimized.Count; i++)
+                {
+                    var optimized = map.ValuesOptimized[i];
+                    if (optimized.EntityHash == id.EntityHash && optimized.IdType.Equals(id.IdType))
+                    {
+                        return MaterializeOptimizedStats(map, id, optimized, index, i);
+                    }
+                }
+            }
+
+            if (index >= 0 && index < map.Values.Count)
+            {
+                return map.Values[index];
+            }
+
+            return null;
+        }
+
+        private static bool HasUsableLegacyStats(gameSavedStatsData data)
+        {
+            if (data == null)
+            {
+                return false;
+            }
+
+            if (data.ModifiersBuffer?.Data != null)
+            {
+                return true;
+            }
+
+            if (data.ForcedModifiersBuffer?.Data != null)
+            {
+                return true;
+            }
+
+            if (data.StatModifiers is { Count: > 0 })
+            {
+                return true;
+            }
+
+            if (data.Seed != 0 || (ulong)data.RecordID != 0)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Expand a ValuesOptimized entry into the legacy Keys/Values layout the editor mutates,
+        /// then remove the optimized entry so we do not keep two copies of the same object.
+        /// </summary>
+        private static gameSavedStatsData MaterializeOptimizedStats(
+            gameStatsStateMapStructure map,
+            gameStatsObjectID id,
+            gameSavedStatsDataOptimized optimized,
+            int keyIndex,
+            int optimizedIndex)
+        {
+            var data = new gameSavedStatsData
+            {
+                Seed = optimized.Seed,
+                StatModifiers = optimized.StatModifiers ?? new CArray<CHandle<gameStatModifierData_Deprecated>>(),
+                InactiveStats = new CArray<CEnum<gamedataStatType>>()
+            };
+
+            if (map.SharedRecordId != null && optimized.RecordIDIndex < map.SharedRecordId.Count)
+            {
+                data.RecordID = map.SharedRecordId[optimized.RecordIDIndex];
+            }
+
+            if (map.SharedInactiveStats != null && optimized.InactiveStatsIndices != null)
+            {
+                foreach (var inactiveIndex in optimized.InactiveStatsIndices)
+                {
+                    if (inactiveIndex < map.SharedInactiveStats.Count)
+                    {
+                        data.InactiveStats.Add(map.SharedInactiveStats[inactiveIndex]);
+                    }
+                }
+            }
+
+            // Prefer StatModifiers handles. SharedDataBuffer slices (BufferSliceIndices) are a
+            // denser 2.5 packing; without a verified sample we only expand what we can safely map.
+            var modifiers = new ModifiersBuffer();
+            if (data.StatModifiers != null)
+            {
+                foreach (var handle in data.StatModifiers)
+                {
+                    if (handle?.Chunk is gameStatModifierData_Deprecated modifier)
+                    {
+                        modifiers.Entries.Add(modifier);
+                    }
+                }
+            }
+
+            data.ModifiersBuffer = new DataBuffer { Data = modifiers };
+
+            if (keyIndex < 0)
+            {
+                map.Keys.Add(id);
+                map.Values.Add(data);
+            }
+            else
+            {
+                while (map.Values.Count <= keyIndex)
+                {
+                    map.Values.Add(new gameSavedStatsData());
+                }
+
+                map.Values[keyIndex] = data;
+            }
+
+            map.ValuesOptimized.RemoveAt(optimizedIndex);
+            return data;
         }
 
         public void SetConstantStat(gamedataStatType stat, float value, gameSavedStatsData statsData, gameStatModifierType mod = gameStatModifierType.Additive)
@@ -211,7 +335,9 @@ namespace CP2077SaveEditor
             do
             {
                 var seed = (uint)(rand.Next(1 << 30)) << 2 | (uint)(rand.Next(1 << 2));
-                if (statsMap.Values.FirstOrDefault(x => x.Seed == seed) == null)
+                var usedInValues = statsMap.Values != null && statsMap.Values.Any(x => x.Seed == seed);
+                var usedInOptimized = statsMap.ValuesOptimized != null && statsMap.ValuesOptimized.Any(x => x.Seed == seed);
+                if (!usedInValues && !usedInOptimized)
                 {
                     return seed;
                 }

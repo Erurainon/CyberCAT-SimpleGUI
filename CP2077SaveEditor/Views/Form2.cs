@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -163,41 +162,37 @@ namespace CP2077SaveEditor.Views
                 await Task.Run(() =>
                 {
                     using var fs = File.Open(savePath, FileMode.Open);
-                    using var reader = new CyberpunkSaveReader(fs);
-
-                    status = reader.ReadFile(out var save);
-                    switch (status)
+                    var loadResult = SaveRoundTrip.Load(fs);
+                    if (!loadResult.Success)
                     {
-                        case EFileReadErrorCodes.NoError:
-                            ActiveSaveFile = new SaveFileHelper { SaveFile = save };
-
-                            var metadataPath = Path.Combine(Path.GetDirectoryName(savePath), "metadata.9.json");
-                            if (File.Exists(metadataPath))
-                            {
-                                ActiveSaveFile.Metadata = File.ReadAllBytes(metadataPath);
-                            }
-
-                            var screenshotPath = Path.Combine(Path.GetDirectoryName(savePath), "screenshot.png");
-                            if (File.Exists(screenshotPath))
-                            {
-                                ActiveSaveFile.ImageData = File.ReadAllBytes(screenshotPath);
-                            }
-
-                            this.InvokeIfRequired(() => { saveChangesButton.Enabled = true; });
-                            break;
-                        case EFileReadErrorCodes.NoCSav:
-                            MessageBox.Show("Failed to parse save file: File contains invalid data");
-                            return;
-                        case EFileReadErrorCodes.UnsupportedVersion:
-                            fs.Position = 0;
-                            reader.ReadFileInfo(out var info);
-
-                            MessageBox.Show(
-                                $"Failed to parse save file: Game version {info.Value.GameVersion} is not supported!");
-                            return;
-                        default:
-                            throw new ArgumentOutOfRangeException();
+                        status = EFileReadErrorCodes.NoCSav;
+                        this.InvokeIfRequired(() => MessageBox.Show(loadResult.Message));
+                        return;
                     }
+
+                    status = EFileReadErrorCodes.NoError;
+                    ActiveSaveFile = new SaveFileHelper { SaveFile = loadResult.Save };
+
+                    if (loadResult.Diagnostics is { UsesOptimizedStats: true })
+                    {
+                        // Informational only — stats are materialized on first edit.
+                        System.Diagnostics.Debug.WriteLine(
+                            $"Save uses ValuesOptimized stats ({loadResult.Diagnostics.StatsValuesOptimized} entries), gameVersion={loadResult.Diagnostics.GameVersion}");
+                    }
+
+                    var metadataPath = Path.Combine(Path.GetDirectoryName(savePath), "metadata.9.json");
+                    if (File.Exists(metadataPath))
+                    {
+                        ActiveSaveFile.Metadata = File.ReadAllBytes(metadataPath);
+                    }
+
+                    var screenshotPath = Path.Combine(Path.GetDirectoryName(savePath), "screenshot.png");
+                    if (File.Exists(screenshotPath))
+                    {
+                        ActiveSaveFile.ImageData = File.ReadAllBytes(screenshotPath);
+                    }
+
+                    this.InvokeIfRequired(() => { saveChangesButton.Enabled = true; });
                 });
 
                 filePathLabel.Text = Path.GetFileName(Path.GetDirectoryName(savePath));
@@ -292,46 +287,64 @@ namespace CP2077SaveEditor.Views
             SetStatus("Saving...");
             _isSaving = true;
 
+            var savedOk = false;
             try
             {
-                using var ms = new MemoryStream();
-
+                SaveRoundTrip.Result validateResult = null;
                 await Task.Run(() =>
                 {
-                    using var writer = new CyberpunkSaveWriter(ms, Encoding.UTF8, true);
-                    writer.WriteFile(ActiveSaveFile.SaveFile, true);
+                    validateResult = SaveRoundTrip.SerializeAndValidate(ActiveSaveFile.SaveFile);
                 });
 
-                await using (var fs = File.Open(fileName, FileMode.Create))
+                if (validateResult == null || !validateResult.Success || validateResult.SerializedBytes == null)
                 {
-                    ms.Position = 0;
-                    await ms.CopyToAsync(fs);
-                }
+                    var message = validateResult?.Message ?? "Unknown validation failure";
+                    try
+                    {
+                        await File.WriteAllTextAsync("error.txt", message);
+                    }
+                    catch
+                    {
+                        // ignore secondary IO errors
+                    }
 
-                var metadataPath = Path.Combine(fileDirectory, "metadata.9.json");
-                if (!File.Exists(metadataPath))
-                {
-                    if (ActiveSaveFile.Metadata != null)
-                    {
-                        await File.WriteAllBytesAsync(metadataPath, ActiveSaveFile.Metadata);
-                    }
-                    else
-                    {
-                        MessageBox.Show("Error while saving file: metadata.9.json could not be found.");
-                    }
+                    MessageBox.Show(
+                        "Refusing to write save: serialize/re-parse validation failed." + Environment.NewLine +
+                        message + Environment.NewLine +
+                        "The destination file was not modified.",
+                        "Save aborted");
                 }
-
-                var screenshotPath = Path.Combine(fileDirectory, "screenshot.png");
-                if (!File.Exists(screenshotPath))
+                else
                 {
-                    if (ActiveSaveFile.ImageData != null)
+                    await File.WriteAllBytesAsync(fileName, validateResult.SerializedBytes);
+
+                    var metadataPath = Path.Combine(fileDirectory, "metadata.9.json");
+                    if (!File.Exists(metadataPath))
                     {
-                        await File.WriteAllBytesAsync(screenshotPath, ActiveSaveFile.ImageData);
+                        if (ActiveSaveFile.Metadata != null)
+                        {
+                            await File.WriteAllBytesAsync(metadataPath, ActiveSaveFile.Metadata);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Error while saving file: metadata.9.json could not be found.");
+                        }
                     }
-                    else
+
+                    var screenshotPath = Path.Combine(fileDirectory, "screenshot.png");
+                    if (!File.Exists(screenshotPath))
                     {
-                        MessageBox.Show("Error while saving file: screenshot.png could not be found.");
+                        if (ActiveSaveFile.ImageData != null)
+                        {
+                            await File.WriteAllBytesAsync(screenshotPath, ActiveSaveFile.ImageData);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Error while saving file: screenshot.png could not be found.");
+                        }
                     }
+
+                    savedOk = true;
                 }
             }
             catch (Exception err)
@@ -352,7 +365,7 @@ namespace CP2077SaveEditor.Views
             saveChangesButton.Enabled = true;
 
             _isSaving = false;
-            SetStatus("File saved.");
+            SetStatus(savedOk ? "File saved." : "Save aborted.");
 
             GC.Collect();
         }

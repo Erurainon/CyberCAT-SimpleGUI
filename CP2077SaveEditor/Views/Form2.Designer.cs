@@ -131,7 +131,7 @@ namespace CP2077SaveEditor.Views
             // 
             tssl_Info.Name = "tssl_Info";
             tssl_Info.Size = new System.Drawing.Size(41, 17);
-            tssl_Info.Text = "v0.28c";
+            tssl_Info.Text = "v0.29a";
             // 
             // Form2
             // 
